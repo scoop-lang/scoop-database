@@ -1,0 +1,24 @@
+package scoop.db.sqlite.tests
+
+import scoop.asyncio.*
+import scoop.db.sqlite.*
+import scoop.test.*
+
+@Test
+private class SQLiteBundledTests {
+    @Test
+    fun `bundled engine uses the pinned version and serialized threading`() {
+        eventLoop().run {
+            SqliteDataSource(SqliteLocation.Memory).connect().useAsync {
+                connection ->
+                val row =
+                    querySql(
+                        connection,
+                        "SELECT sqlite_version() AS version, sqlite_compileoption_used('THREADSAFE=1') AS threadsafe"
+                    )[0L]
+                assertEquals("3.54.1", rowText(row, "version"))
+                assertEquals(1L, rowLong(row, "threadsafe"))
+            }
+        }
+    }
+}

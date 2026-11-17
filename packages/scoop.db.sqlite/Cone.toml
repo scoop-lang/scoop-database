@@ -1,0 +1,45 @@
+schema = 1
+
+[cone]
+group = "scoop"
+name = "scoop.db.sqlite"
+version = "0.1.0"
+kind = "library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/scoop-lang/scoop-database"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.std" = "0.1.0"
+"scoop:scoop.platform" = "0.1.0"
+"scoop:scoop.asyncio" = "0.1.0"
+"scoop:scoop.db" = { path = "../scoop.db", version = "0.1.0" }
+"scoop:scoop.db.sql" = { path = "../scoop.db.sql", version = "0.1.0" }
+
+[test-dependencies]
+"scoop:scoop.test" = "0.1.0"
+
+[native]
+include = ["vendor/sqlite"]
+c_flags = ["-std=c11", "-DSQLITE_THREADSAFE=1"]
+
+[[native.sources]]
+path = "native/control.c"
+
+[[native.sources]]
+path = "native/statements.c"
+
+[[native.sources]]
+path = "vendor/sqlite/sqlite3.c"
+
+[[native.libraries]]
+name = "pthread"
+when = { os = "linux" }
+
+[[native.libraries]]
+name = "dl"
+when = { os = "linux" }
+
+[[native.libraries]]
+name = "m"
+when = { os = "linux" }

@@ -1,0 +1,17 @@
+schema = 1
+
+[cone]
+group = "scoop"
+name = "scoop.db.sql"
+version = "0.1.0"
+kind = "library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/scoop-lang/scoop-database"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.db" = { path = "../scoop.db", version = "0.1.0" }
+"scoop:scoop.asyncio" = "0.1.0"
+
+[test-dependencies]
+"scoop:scoop.test" = "0.1.0"

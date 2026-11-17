@@ -1,0 +1,14 @@
+schema = 1
+
+[workspace]
+members = [
+    "packages/scoop.db",
+    "packages/scoop.db.sql",
+    "packages/scoop.db.sqlite",
+    "examples/records",
+]
+default-members = [
+    "packages/scoop.db",
+    "packages/scoop.db.sql",
+    "packages/scoop.db.sqlite",
+]

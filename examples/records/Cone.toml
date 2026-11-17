@@ -1,0 +1,17 @@
+schema = 1
+
+[cone]
+group = "scoop.database.examples"
+name = "records"
+version = "0.1.0"
+kind = "executable"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/scoop-lang/scoop-database"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.std" = "0.1.0"
+"scoop:scoop.asyncio" = "0.1.0"
+"scoop:scoop.db" = { path = "../../packages/scoop.db", version = "0.1.0" }
+"scoop:scoop.db.sql" = { path = "../../packages/scoop.db.sql", version = "0.1.0" }
+"scoop:scoop.db.sqlite" = { path = "../../packages/scoop.db.sqlite", version = "0.1.0" }
