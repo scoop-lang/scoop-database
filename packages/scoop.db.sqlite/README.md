@@ -13,7 +13,7 @@ SQLite 驱动，实现 `scoop.db.sql.TransactionalSqlConnection`。随库包含 
 "scoop:scoop.db.sqlite" = { path = "../scoop-database/packages/scoop.db.sqlite", version = "0.1.0" }
 ```
 
-可运行程序见 [record 示例](../../examples/records/README.md)，在仓库根执行 `scoop run --release examples/records`：从普通 record 编码参数，在事务中写入，再按字段名惰性解码查询结果。
+[record 示例](../../examples/records/README.md)包含生成器注册与运行命令。程序从普通 record 生成参数，在事务中写入，再按列名逐行读取结果。
 
 `SqliteDataSource(SqliteLocation.Memory)` 每次 connect 创建独立内存库。文件使用 `SqliteLocation.File(Path.fromString(...))`，读取文件还需直接依赖 scoop.platform。File 拒绝空路径和裸 `:memory:`，不把路径当 URI。`SqliteOptions(readOnly, busyTimeout)` 不改变 journal mode 或其他应用 PRAGMA；busyTimeout 默认为零。
 
@@ -29,7 +29,7 @@ connect 要求活动 EventLoop。打开、prepare、step、reset/finalize、事�
 | TEXT | Text，严格 UTF-8 |
 | BLOB | Bytes，空值与 NULL 分开 |
 
-Boolean 参数绑定为 0/1，读取时由显式 codec 选择解释。Unsigned 超过 Long.MAX_VALUE、NaN、Record/Sequence 和非空 nativeTypeName 提示在执行前拒绝；时间、Decimal、JSON 等须先显式编码。TEXT 支持内嵌 NUL，SQL 文本和文件路径仍遵守各自字符串/路径规则。
+Boolean 参数绑定为 0/1，读取时可用显式 ColumnCodec<Boolean> 解释整数。Unsigned 超过 Long.MAX_VALUE、NaN、Record/Sequence 和非空 nativeTypeName 提示在执行前拒绝；时间、Decimal、JSON 等须先显式编码。TEXT 支持内嵌 NUL，SQL 文本和文件路径仍遵守各自字符串/路径规则。
 
 具名参数保留 `:x`、`@x`、`$x` 等精确名称，重复名称共用一个 slot；`?NNN` 稀疏编号使用 positional 并提供到最大 slot 的所有值。结果列可重名，按名称解码前用 Row.select 投影重命名。
 

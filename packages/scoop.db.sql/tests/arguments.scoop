@@ -6,11 +6,11 @@ import scoop.test.*
 
 private fun longParameter(value: Long): SqlParameter = SqlParameter(RowValue.Signed(value))
 
-private fun longValue(value: SqlParameter): Long =
-    Rows.valueDecoder(value.value).singleValue().readLong()
+private fun longValue(value: SqlParameter): Long = RowCell(value.value).readLong()
 
 private struct Input(val name: String, val id: Long, val note: String?) {
-    public companion object: ValueEncoder<Input>
+    @GenerateWith("scoop.db", ["RowWriter<Input>"])
+    public companion object: RowWriter<Input>
 }
 
 @Test
@@ -84,15 +84,11 @@ private class SqlArgumentsTests {
         val args = SqlArguments.fromRow(row, ["id", "name"])
         val values = args.resolve([SqlParameterInfo(0L, None), SqlParameterInfo(1L, None)])
         assertEquals(7L, longValue(values[0L]))
-        assertEquals("Ada", Rows.valueDecoder(values[1L].value).singleValue().readString())
+        assertEquals("Ada", RowCell(values[1L].value).readString())
         assertFailsWith<MissingColumnException> { SqlArguments.fromRow(row, ["note"]) }
         assertFailsWith<IllegalArgumentException> { SqlArguments.fromRow(row, ["id", "id"]) }
         val nullArgs = SqlArguments.positional([SqlParameter(RowValue.Null)])
-        assertTrue(
-            Rows.valueDecoder(
-                nullArgs.resolve([SqlParameterInfo(0L, None)])[0L].value
-            ).singleValue().isNull()
-        )
+        assertTrue(RowCell(nullArgs.resolve([SqlParameterInfo(0L, None)])[0L].value).isNull())
     }
 
     @Test

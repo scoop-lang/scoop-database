@@ -8,9 +8,9 @@
 
 `examples/records` 是独立 executable 成员，使用同一组源码库完成 record 往返。项目的 build/test/run 使用现有 Scoop 命令，不复制编译器、runtime 或系统库，不增加构建协议。依赖解析遵守上游[包管理规范](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-PACKAGE-SPEC.md)。
 
-公共层只规定逻辑 Connection、DataSource、ResultStream、异步生命周期和可选的表格 Row/codec。SQL Statement、参数与事务属于 `scoop.db.sql`；SQLite 原生连接和调用属于 `scoop.db.sqlite`。HBase cells 和 Cosmos 文档不必转换为 Row，本期不实现这两个驱动。
+公共层只规定逻辑 Connection、DataSource、ResultStream、异步生命周期和可选的表格 Row 映射。SQL Statement、参数与事务属于 `scoop.db.sql`；SQLite 原生连接和调用属于 `scoop.db.sqlite`。HBase cells 和 Cosmos 文档不必转换为 Row，本期不实现这两个驱动。
 
-record 指普通 struct/class。映射复用语言规范 9.5、11.13 的 ValueEncoder/ValueDecoder、方法合成和容器协议；不引入 ORM、反射、数据库宏、查询生成或持久化身份。普通库行为由所属 Cone 的 `scoop.test` 验证。
+record 是应用的普通 struct/class。表格映射的接口、列注解和值转换均由 `scoop.db.row` 定义。宿主程序 `scoop-db-generator` 使用 Scoop 的 `generator/generate` 协议（版本 2），在编译期为 `@GenerateWith("scoop.db", ["RowWriter<T>", "RowReader<T>"])` 选中的缺失方法生成普通 Scoop 正文。可以分别选择读、写，或手写其中任一方法。调用方通过 `--generator scoop.db=<宿主程序路径>` 注册工具。SQL 文本、事务和参数顺序仍由应用指定。
 
 ## 2. 公共资源与异步调用
 
@@ -38,19 +38,17 @@ DbException 保留 operation、message、cause；Closed/Busy/Timeout 是库能�
 
 mapRecords 与 decodeRecords 每次同步映射一项，接管源流的消费和关闭责任。映射失败关闭源流，双失败用 ResourceUseException；调用者不得并行消费已交给 wrapper 的源流。
 
-## 4. Row 与 codec
+## 4. Row 与 record 映射
 
-Row/RowSchema 是不可变快照，列和值数量一致；Long 索引从零开始。列名可以重复，按名字读取歧义时报 AmbiguousColumnException，缺列时报 MissingColumnException；getOrNone 仅对缺列返回 None。select 按显式序号投影并重命名，目标名唯一。
+Row/RowSchema 是不可变快照，列和值数量一致，Long 索引从零开始。列名可以重复。按名字读取有歧义时抛 AmbiguousColumnException，缺列时抛 MissingColumnException，getOrNone 仅对缺列返回 None。select 按显式序号投影并重命名，目标名唯一。Column.nativeTypeName 记录后端元数据。RowValue 包含 Null、Boolean、Signed(Long)、Unsigned(ULong)、Float32、Float64、Text、Bytes、Record(Row)、Sequence(Array<RowValue>)。
 
-RowValue 的值域为 Null、Boolean、Signed(Long)、Unsigned(ULong)、Float32、Float64、Text、Bytes、Record(Row)、Sequence。它不是所有数据库的共同 wire 类型。Column.nativeTypeName 是实际元数据，不决定当前值类型或非空性。
+`Rows.encodeToRow(value, writer)` 调用 `RowWriter<T>.writeRow(value, row: RowBuilder)`。每次 `row.put(name, value)` 添加一个完整 RowValue，按写入顺序建立列，重复名称报 AmbiguousColumnException。`build()` 发布不可变快照。`Rows.decodeFromRow(row, reader, options)` 与 `ResultStream<Row>.decodeRecords(reader, options)` 使用 `RowReader<T>.readRow(row: RowInput)`。RowInput 按列名取 `required` 或 `optional`，返回可复读的 RowCell；重复列应先用 select 消歧。生成代码在构造结果前调用 `finish()`。默认忽略额外列，UnknownColumnPolicy.Reject 检查本层未读取的列，并传递到嵌套行。手写 reader 也可提前调用 `finish()`；直接返回时，读取入口在交付结果前完成该检查。缺必需列、重复列、未知列、值形状和数值范围错误均报 RowMappingException，path 从空串开始，列名中 `~`、`/` 分别转义为 `~0`、`~1`，数组元素使用十进制零基下标。用户转换与构造器异常原样传播。
 
-Rows.encodeToRow 要求 keyed 根，按实际 codec 字段输出；遵守根提交、pending 子值、重复 key 和只写一次的既有规则。Rows.decodeFromRow 使用 keyed 根，Rows.valueDecoder 显式适配单个值。Decoder 稳定、可复读，形状/类型失败不消费值；每个 unkeyed 视图有独立游标。
+生成器按主构造器参数顺序映射 struct 或无 class 基类的 final class 的普通存储成员。生成读取要求主构造器是唯一可见构造器。计算属性不占列；有额外存储或自定义访问器时可手写相应方向。`@DbColumn(name = "…", required = …, emitNull = …, ignore = …)` 用于字段或属性，空 name 使用声明名，有效列名须唯一。ignore 与其他设置互斥，忽略的参数使用声明默认值或可空参数的 None。required 要求列出现，emitNull 适用于可空字段。默认省略声明为 Option 的 None；required 或 emitNull 会保留列，内置可空转换将它写作 Null。缺列优先采用原构造参数默认值，其次对可空参数传 None。内置可空转换将显式 Null 读为 None，内置非空转换报告错误。生成代码在转换各列并检查未知列后才执行一次普通具名构造调用，保留默认值的声明作用域、求值顺序与异常。
 
-未知列默认 Ignore；Reject 在当前 keyed.end 检查未通过 required/optional 取得的字段，keys 枚举不计访问。path 使用语言规范的 JSON Pointer 规则。
+内置列映射支持 Boolean、各宽度的有符号和无符号整数、Float、Double、String 与 Char（一个 Unicode 标量的 Text）。整数读取可在实际值可表示时跨符号或宽度转换，浮点只额外允许 Float32 提升到 Double。`Array<Byte>` 对应 Bytes（包括空 BLOB），其他 Array 递归映射 Sequence，显式 Null 与空集合各自保留。嵌套 record 通过其对应方向的行映射生成 Record。自定义单列类型可在 companion 实现 `ColumnCodec<T>`，也可在映射器主构造器通过一个匹配的 `val` 传入列转换，后者优先，显式转换自行决定所接收列值的表示。多份匹配的依赖在字段处报错。日期、Decimal、数据库特有的整数布尔值等由显式转换处理。
 
-数值只允许 Signed/Unsigned 范围内精确转换和 Float32→Float64 提升；其他数值种类转换须显式 codec。Boolean 不隐式读取整数，Text 不自动解析数值。BinaryEncodingContainer/BinaryDecodingContainer 以普通接口扩展单值容器；RowBytesCodec 使用它们，默认 Array<Byte> codec 仍为整数序列。
-
-字段缺失、Null、有值和删除/DEFAULT 分开。Serialize、默认值、Option 省略沿用语言规范；显式 Null 不使用构造默认值。Row 不产生数据库写操作，字段省略不自动变成 NULL 或删除。嵌套值不自动绑定成 SQL scalar；JSON、时间、Decimal 等使用明确 codec。
+字段省略只影响行快照。SQL 参数顺序由 `SqlArguments.fromRow` 的 fieldOrder 给出，显式 NULL、缺参数、SQL DEFAULT 与删除分别处理。Record 和 Sequence 保持结构，绑定到 SQL 标量需要应用显式转换。
 
 ## 5. SQL 能力
 
@@ -68,7 +66,7 @@ SqlTransaction.state 为 Active/Committed/RolledBack/Invalid。begin 的迟到�
 
 rollback/close 可在取消后使用；关闭 Active 事务回滚，已完成事务幂等，Invalid 只收尾。后端自动回滚同步到 state。transaction helper 向正文提供 SqlSession，先等待正文结构化子任务，再检查取消并提交；提交后不追加取消检查。原失败与回滚失败均保留。手动事务控制 SQL 不得改变受管理事务的归属。
 
-本版 SQL Row/参数值域不能无损表示的原生类型报转换错误，专属 API 可以保留自己的类型和 Decoder；不通过隐式 Text/Double 转换伪装支持。
+本版 SQL Row/参数值域不能无损表示的原生类型报转换错误，专属 API 可以保留自己的类型和读取接口；不通过隐式 Text/Double 转换伪装支持。
 
 ## 6. SQLite
 

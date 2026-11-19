@@ -5,8 +5,9 @@ import scoop.db.row.*
 import scoop.db.sql.*
 import scoop.db.sqlite.*
 
-struct User(val id: Long, val name: String, @Serialize(emitNull = true) val note: String?) {
-    public companion object: ValueEncoder<User>, ValueDecoder<User>
+struct User(val id: Long, val name: String, @DbColumn(emitNull = true) val note: String?) {
+    @GenerateWith("scoop.db", ["RowWriter<User>", "RowReader<User>"])
+    public companion object: RowWriter<User>, RowReader<User>
 }
 
 fun main() {

@@ -1,0 +1,44 @@
+package scoop.database.tests.invalid
+
+import scoop.db.row.*
+
+private struct Duplicate(val id: Long, @DbColumn(name = "id") val second: Long) {
+    @GenerateWith("scoop.db", ["RowWriter<Duplicate>"])
+    public companion object: RowWriter<Duplicate>
+}
+
+private struct BadNull(@DbColumn(emitNull = true) val count: Long) {
+    @GenerateWith("scoop.db", ["RowWriter<BadNull>"])
+    public companion object: RowWriter<BadNull>
+}
+
+private struct NoDefault(@DbColumn(ignore = true) val hidden: Long) {
+    @GenerateWith("scoop.db", ["RowReader<NoDefault>"])
+    public companion object: RowReader<NoDefault>
+}
+
+private struct Conflicting(@DbColumn(ignore = true, required = true) val text: String?) {
+    @GenerateWith("scoop.db", ["RowReader<Conflicting>"])
+    public companion object: RowReader<Conflicting>
+}
+
+private struct Unmapped(val id: Long)
+
+private struct Missing(val item: Unmapped) {
+    @GenerateWith("scoop.db", ["RowReader<Missing>"])
+    public companion object: RowReader<Missing>
+}
+
+private struct Ambiguous(val active: Boolean)
+
+@GenerateWith("scoop.db", ["RowReader<Ambiguous>"])
+private class AmbiguousReader(
+    private val first: ColumnCodec<Boolean>,
+    private val second: ColumnCodec<Boolean>
+): RowReader<Ambiguous>
+
+private class OtherConstructor(val name: String, val number: Long = 0L) {
+    public constructor(name: String): this(name, 9L) {}
+    @GenerateWith("scoop.db", ["RowReader<OtherConstructor>"])
+    public companion object: RowReader<OtherConstructor>
+}

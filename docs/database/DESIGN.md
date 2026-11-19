@@ -14,7 +14,7 @@ SQLite 3.54.1 官方 amalgamation 随驱动源码编译，启用线程安全，�
 
 设计遵守以下已有合同：
 
-- [语言规范](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-SPEC.md) 3.2、9.5、11.13：普通泛型接口、显式 codec、方法合成及 keyed/unkeyed/single-value 容器。
+- [语言规范](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-SPEC.md) 3.2、9.5 的普通泛型接口与 `@GenerateWith`，宿主进程按[生成器协议](https://github.com/scoop-lang/scoop/blob/main/docs/milestone47/PROTOCOL.md)查询类型和成员。
 - 同一规范 11.9.1～11.9.3、11.18：Job、取消、executor、blocking、确定性资源释放。
 - [异步 I/O 规范](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-ASYNCIO-SPEC.md)第 3 节：结果选择与原生请求结束分开协调，AsyncCloseable/useAsync。
 - [并发库规范](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-CONCURRENT-SPEC.md)第 5 节：managed BlockingTaskPool 与执行登记的退出义务。
@@ -22,9 +22,7 @@ SQLite 3.54.1 官方 amalgamation 随驱动源码编译，启用线程安全，�
 - [编译器与产物规范](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-IMPL-SPEC.md) 2.7～2.8：普通 Cone、native 输入和链接；数据库不形成新的 stage、实体角色或 ABI。
 - [公共 API 风格](https://github.com/scoop-lang/scoop/blob/main/docs/specs/SCOOP-API-STYLE.md)：Long 索引、Option、资源命名、快照和显式 codec。
 
-本期不设计 ORM、表模型、关系加载、变更跟踪、自动增删改、schema 迁移、SQL 构造 DSL 或编译期数据库查询。不增加反射、数据库宏或数据库专属方法合成。普通 codec 可以复用现有合成，也可以手写。
-
-Swift 侧可借鉴的是职责划分：[SQLKit 的 SQLRowDecoder](https://github.com/vapor/sql-kit/blob/main/Sources/SQLKit/Rows/SQLRowDecoder.swift)将行适配到 Decodable，[GRDB](https://github.com/groue/GRDB.swift#record-protocols-overview)也区分记录映射与单列值转换。Scoop 沿用自己的 ValueEncoder/ValueDecoder 完成同类适配；借鉴的是类型侧 codec 与格式侧容器的分工，不引入这些库的持久化模型。
+本期不设计 ORM、表模型、关系加载、变更跟踪、自动增删改、schema 迁移、SQL 构造 DSL 或编译期数据库查询。不增加反射、数据库宏或数据库专属方法合成。record 的行读写既可由数据库生成器生成，也可由应用手写。数据库区分整行映射和单列转换，可与同一模型上独立声明的 JSON 映射共存。
 
 ## 2. 分层与共同边界
 
@@ -43,7 +41,7 @@ Swift 侧可借鉴的是职责划分：[SQLKit 的 SQLRowDecoder](https://github
 | 访问对象 | 资源归属、关闭与在途工作收尾 | 物理连接、客户端、连接池或远端会话 |
 | 请求 | 不规定共同的 `execute(String)` | SQL 文本与绑定、Get/Scan、文档点操作、作业提交 |
 | 结果 | 有类型的异步结果流；稳定的数据交付 | 行、文档、cells、分页、原生批次 |
-| 数据映射 | 使用现有 ValueEncoder/ValueDecoder | 字段地址、二进制表示、版本选择、专属标量 |
+| 数据映射 | 表格按列读写，其他后端选择自己的数据映射 | 字段地址、二进制表示、版本选择、专属标量 |
 | 事务 | 不要求每个 Connection 支持事务 | SQL 会话事务、分区原子批次、单行原子操作 |
 | 并发 | 单个流的消费规则与关闭协调 | 同一客户端可否并行、会话独占范围 |
 | 取消 | 本地收尾、结果竞争、恢复位置 | 是否能取消远端操作及如何得知最终结果 |
@@ -218,7 +216,7 @@ public class AmbiguousColumnException public constructor(name: String)
     : Exception(Some("ambiguous column: " + name))
 ```
 
-工厂复制 List 结构，Row/RowSchema 和载荷数组只读，内部不可变子值可以共享。fromValues 要求列数与值数一致，失败不发布 Row。公共 RowValue 是这项工具支持的值域，不是所有数据库必须使用的 wire 类型系统。专属值仍可留在驱动原生结果及其 Decoder 中。
+工厂复制 List 结构，Row/RowSchema 和载荷数组只读，内部不可变子值可以共享。fromValues 要求列数与值数一致，失败不发布 Row。公共 RowValue 是这项工具支持的值域，不是所有数据库必须使用的 wire 类型系统。专属值仍可留在驱动原生结果中。
 
 序号从零开始，类型为 Long。schema 允许重复列名；indexOf 在没有匹配时返回 None、多个匹配时报 AmbiguousColumnException。get(name) 在没有匹配时抛 MissingColumnException；getOrNone 仅缺列时返回 None，显式 Null 返回 Some(RowValue.Null)。索引越界使用 IndexOutOfBoundsException。
 
@@ -226,104 +224,48 @@ nativeTypeName 是数据库确实提供的类型名快照；未知为 None。它
 
 select 按明确源序号投影并重命名，不执行 I/O，保留对应原生类型元数据并共享不可变值。目标名称须唯一。这个入口解决 join 的重名列与查询别名适配；不遍历 record 的类型描述来猜映射。
 
-### 5.2 Encoder/Decoder 接入
+### 5.2 生成整行读写方法
 
 ```scoop
-public enum UnknownColumnPolicy { Ignore, Reject }
-public struct RowDecodingOptions(
-    val unknownColumns: UnknownColumnPolicy = UnknownColumnPolicy.Ignore
-)
-
-public object Rows {
-    public fun <T> encodeToRow(value: T, codec: ValueEncoder<T>): Row
-    public fun <T> decodeFromRow(
-        row: Row,
-        codec: ValueDecoder<T>,
-        options: RowDecodingOptions = RowDecodingOptions()
-    ): T
-    public fun decoder(
-        row: Row,
-        options: RowDecodingOptions = RowDecodingOptions()
-    ): Decoder
-    public fun valueDecoder(value: RowValue): Decoder
+public interface RowWriter<T> {
+    public fun writeRow(value: T, row: RowBuilder)
+}
+public interface RowReader<T> {
+    public fun readRow(row: RowInput): T
+}
+public interface ColumnCodec<T> {
+    public fun toValue(value: T): RowValue
+    public fun fromValue(cell: RowCell): T
 }
 ```
 
-encodeToRow 以 keyed record 为根，调用所选 codec 一次，完成现有 encoder 的根提交后发布完整 Row；根 scalar/sequence 报 EncodingException。编码列名取实际 field(name)，nativeTypeName 为 None；不会为了编码再次扫描类型字段。
+`scoop-db-generator` 从待实现接口取得 record 的完整类型，按编译器返回的主构造器与存储成员关系生成普通 Scoop 代码。生成的 writer 对每个选中字段调用 `row.put(列名, 完整值)`。reader 按列名选择 `required` 或 `optional`，转换当前行后调用 `finish()`，再用具名实参构造结果。缺列时省略有默认值的实参，让原构造器负责求值。类、字段、构造器和自定义转换仍通过普通源码访问规则绑定。
 
-decodeFromRow 的根为 keyed record。单列标量显式使用 valueDecoder(row.get(name))；tuple 可以先按应用指定的顺序组成 RowValue.Sequence 再解码，不把“第一列”或“全部列的顺序”作为整行映射的隐式规则。valueDecoder 将传入值视为 path 为空的新根，采用默认的未知字段策略。取得 keyed 视图时检查该层重名；有重复列名则映射失败，调用方先 select 消歧。编码/解码的 generic 入口是普通函数，不要求接口方法级泛型。
+`RowBuilder.build()` 发布快照。同名写入报错。RowSchema 保存可复用的列名索引及首个歧义列，多个查询行可以共享 schema。RowInput 用它按名字读取稳定 RowCell。默认忽略未读取列；严格模式在 `finish()` 检查未读取的列，检查成功后释放访问标记。手写 reader 直接返回时由入口完成检查。重复名称用 `select` 按序号消歧。嵌套记录和数组的错误路径继承父字段，按 JSON Pointer 转义。
 
-Rows.decoder 提供稳定视图：required/optional、keys、isNull、子视图和复读完全遵守语言规范 11.13.2。每个 unkeyed 视图有独立游标，重新取得视图从首项开始。UnknownColumnPolicy.Reject 在 keyed.end 时检查这个容器尚未通过 required/optional 访问的现有字段；访问 keys 不算消费字段，不要求用户 codec 读取已取得子视图的所有嵌套值。默认 Ignore 适合查询包含额外列的情况。
+### 5.3 单列转换
 
-内层 Record/Sequence 分别适配 keyed/unkeyed；标量适配 singleValue。isNull 对 Null 返回 true，对其他值返回 false；typed read 再检查种类。基本数值规则：
+`RowCell(row.get("id")).readLong()` 可以独立读取一列。整数按实际值检查符号和宽度，Float32 可提升为 Float64。Boolean 只接受 RowValue.Boolean。SQLite 的 INTEGER 布尔值可用应用提供的 `ColumnCodec<Boolean>` 转换，分别检查 0 和 1。类型错误报含列路径的 RowMappingException。
 
-- Signed/Unsigned 之间只允许范围内的精确整数转换；整数读取不接受浮点或文本。
-- Float32 可精确提升为 Float64；Float64 到 Float32 按显式浮点 codec 的转换规则处理，不能偷偷先改存储精度。
-- 默认浮点读取接受对应精度及 Float32 到 Float64 的提升；整数到浮点、Float64 到 Float32 使用显式转换 codec。
-- Boolean 与整数保持不同种类，Text 不自动解析为数值，类型不符抛带 path 的 DecodingException。
+`Array<Byte>` 对应原生 Bytes，空 BLOB 与 Null 可区分。其他 Array 映射为 Sequence；嵌套 record 的 companion 提供对应方向的行映射。日期、Decimal 等值的一列表示由 `ColumnCodec<T>` 决定。生成器先查映射器主构造器上匹配的 `val`，再用内置转换或字段类型的 companion。完整的用户读写方法也可直接构造和检查 RowValue。
 
-数据库边界可以采用其公开的转换规则，例如 SQLite Boolean 参数写为 0/1；从 SQLite INTEGER 读为 Boolean 需要调用方明确选择相应列 codec，不能让通用 Row 解码把任意非零数解释为 true。
+### 5.4 字段存在性和写入意图
 
-诊断 path 使用已有 JSON Pointer 规则；包含 record 字段和嵌套元素位置。查询返回的行序号、数据库请求信息由外层上下文补充，不修改 codec 的字段 path，也不把用户构造器异常统一转换为数据库错误。
+`@DbColumn` 管理数据库列名、必需列、显式 Null 和忽略字段。缺列在读取时可触发原默认值；显式 Null 传给可空字段。默认省略可空成员的 None；`required` 或 `emitNull` 将其写成有名称的 Null 列。SQL NULL、未绑定参数、SQL DEFAULT 和删除分别由各自入口表达。嵌套值持久化为 JSON 文本等单列类型时由应用显式转换。
 
-### 5.3 二进制、Decimal 和时间
-
-core 单值协议没有 bytes。Row 后端通过普通扩展接口提供这项实际需要的能力：
+### 5.5 流式 record 读取
 
 ```scoop
-public interface BinaryEncodingContainer : SingleValueEncodingContainer {
-    public fun writeBytes(value: List<Byte>)
-}
-public interface BinaryDecodingContainer : SingleValueDecodingContainer {
-    public fun readBytes(): Array<Byte>
-}
-public object RowBytesCodec : ValueEncoder<Array<Byte>>, ValueDecoder<Array<Byte>>
-```
-
-这些接口位于 scoop.db.row。Row 单值容器实现它们；RowBytesCodec 按普通接口转换使用该能力，遇到不支持的格式报 EncodingException/DecodingException。writeBytes 复制输入，遵守单值恰好写一次的规则。默认 Array<Byte> codec 继续表示整数序列，不因底层是数据库而自动变成 BLOB。
-
-日期、时间、Uuid 可以使用已有文本 codec。BigDecimal 需要显式选择精确文本 codec 或驱动专属 Decimal 表示；不经 Double 中转。现阶段不因此把 math 或数据库类型加入 core 单值协议。后续有原生 Decimal/时间类型的驱动可以用自己的 Decoder/Encoder 能力和普通 codec 保留类型，不必先降为公共 RowValue。
-
-同类型字段需要不同策略时，使用手写 record codec；相同策略可按语言规范 11.13.4 注入 codec 构造参数并复用已有方法合成。不增加数据库字段注解或特殊依赖查找。
-
-### 5.4 缺失、Null 与写入意图
-
-| 数据状态 | Row/codec 行为 | 数据库写入解释 |
-| --- | --- | --- |
-| 没有字段 | schema 中没有该列；optional 返回 None | 不自动补 NULL；是否允许省略由请求类型决定 |
-| 显式 Null | 存在列及 Null 子值；交给字段 codec | SQL NULL、JSON null 或该后端明确不支持的值 |
-| 有值 | 存在列及对应子值 | 按显式字段映射编码 |
-| 删除/DEFAULT | 不是 RowValue 的通用值 | 由专属请求表达 |
-
-沿用现有 Serialize(rename/required/emitNull/ignore)、构造默认值和 Option 规则。缺列可以触发既有 default；显式 Null 不触发 default。Option.None 是否省略由既有合成规则决定，数据库映射不能改写它。需要显式 SQL NULL 的可选字段可以使用 Serialize(emitNull = true) 或手写 codec。
-
-嵌套 record/sequence 可保留在 Row 中，但 SQL scalar 绑定不自动接受它们。若要存入 JSON 列，应用显式选择“结构 ↔ JSON 文本/原生 JSON”的列 codec。HBase 的 cell 值是字节，Cosmos 文档可以保留嵌套结构；这两者不被统一改成 SQL 列。
-
-### 5.5 流式 record 解码与示例
-
-```scoop
-public fun <S, T> ResultStream<S>.mapRecords(
-    decode: (S) -> T
-): ResultStream<T>
-
-public fun <T> ResultStream<Row>.decodeRecords(
-    codec: ValueDecoder<T>,
-    options: RowDecodingOptions = RowDecodingOptions()
-): ResultStream<T>
-```
-
-两者惰性地每次取一项并同步转换，不预先读完；next 的 options 传给对应的源流读取，不重新开始计时，随后同步 decode 不被强制中断。成功返回 wrapper 后，调用方将源流的消费和关闭责任交给 wrapper，不能并行使用原流；构造失败源流仍归调用方。decodeRecords 是 mapRecords 加 Rows.decodeFromRow 的普通组合。映射失败使 wrapper 失败并关闭源流，正文/清理双失败遵守 ResourceUseException。关闭 wrapper 关闭源流；已交付 record 保持有效。
-
-```scoop
-public struct User(val id: Long, val name: String, val note: String?) {
-    public companion object : ValueEncoder<User>, ValueDecoder<User> {}
+struct User(val id: Long, val name: String, @DbColumn(emitNull = true) val note: String?) {
+    @GenerateWith("scoop.db", ["RowWriter<User>", "RowReader<User>"])
+    public companion object: RowWriter<User>, RowReader<User>
 }
 
 val row = Rows.encodeToRow(User(7L, "Ada", None), User.Companion)
 val restored = Rows.decodeFromRow(row, User.Companion)
 ```
 
-该例的 note 按现有默认规则省略。若 SQL 明确要求三个参数，应用须选择包含显式 Null 的映射；不能由参数绑定器猜测省略的目的。record 映射本身不产生数据库操作。
+`ResultStream<Row>.decodeRecords(reader, options)` 通过 `mapRecords` 每次转换一个 Row。wrapper 接管源流的消费和关闭，映射失败时关闭源，正文和清理双失败由 ResourceUseException 保留。读取使用此次 next 的时限，已交付 record 保持有效。完整事务与查询调用见[示例](../../examples/records/src/main.scoop)。
 
 ## 6. SQL 能力层
 
@@ -370,7 +312,7 @@ public struct UpdateResult(val affectedRows: Long?)
 
 这些声明位于 scoop.db.sql，不改变 Connection。prepare 接收具体数据库方言，不解析或重写成通用 SQL。首版一次 Statement 对应一条可执行语句和一个结果；多语句脚本、多结果过程不属于这个接口合同。
 
-这个能力承诺本版 RowValue/SqlParameter 能表示的表格值域，不承诺覆盖所有数据库原生类型。后端类型无法在此值域中无损交付时，通用入口明确报转换错误；保留原生 Decimal 等能力的专属查询可以直接返回自己的结果和 Decoder。不通过 Text/Double 的隐式降级伪装成通用支持，也不要求所有支持 SQL 的后端都实现 SqlConnection。
+这个能力承诺本版 RowValue/SqlParameter 能表示的表格值域，不承诺覆盖所有数据库原生类型。后端类型无法在此值域中无损交付时，通用入口明确报转换错误；保留原生 Decimal 等能力的专属查询可以直接返回自己的结果与读取接口。不通过 Text/Double 的隐式降级伪装成通用支持，也不要求所有支持 SQL 的后端都实现 SqlConnection。
 
 Statement 可以重复执行，但同时只有一次执行或一个活动 ResultSet；重叠调用报 DbBusyException，不自动关闭旧结果。每次参数完整传入，执行前形成快照，不保留上次绑定。无参数语句使用 SqlArguments.empty()。
 
@@ -576,24 +518,15 @@ public struct HBaseRecordMapping(
     val fields: Array<HBaseField>,
     val readVersion: HBaseReadVersion = HBaseReadVersion.Latest
 )
-public object HBaseRecords {
-    public fun <T> decode(row: HBaseRow, mapping: HBaseRecordMapping, codec: ValueDecoder<T>): T
-    public fun <T> encodeToPut(
-        key: List<Byte>,
-        value: T,
-        mapping: HBaseRecordMapping,
-        codec: ValueEncoder<T>
-    ): HBasePut
-}
 ```
 
-field 名交给 record 的 keyed codec，address 定位真实 cell，format 明确字节解释。Bytes 使用第 5.3 节的二进制容器能力；Utf8 严格验证；Int64BigEndian 要求恰好八字节，保持有符号值。映射的字段名和写目标地址必须唯一。编码时出现没有映射的字段或不符合 format 的值会失败，不能静默丢失字段；解码只暴露映射选中的 cells，其他 cells 留在原始结果。未知格式不靠猜测或文本 fallback。
+此处仅描述 cell 映射的输入。字段名关联实际地址，format 决定字节解释。Bytes 保留原始字节，Utf8 严格验证，Int64BigEndian 要求恰好八字节。写目标地址必须唯一，未选的 cells 留在原始结果中。未来的 HBase 驱动可直接按自己的 cell 表示读写 record。
 
 Latest 明确选择已返回版本中的最大 timestamp，At 要求指定版本；找不到该版本表现为缺字段。原始 HBaseRow 不因此丢弃其他版本。应用要求处理全部版本时直接使用原始 cells，不通过这个单值 record 映射。
 
-encodeToPut 按字段映射生成单次 Put，每个值使用后端时间戳，readVersion 不用于写入。row key 由参数显式给出，不从名为 id 的属性推断。codec 省略的字段不产生 cell write；显式 Null 抛 EncodingException，空字节仍是有效值。删除旧 cell 必须使用明确的 HBase 删除操作，不由 None 推导。向已有 row 写部分字段不承诺清除未出现的旧字段。
+encodeToPut 按字段映射生成单次 Put，每个值使用后端时间戳，readVersion 不用于写入。row key 由参数显式给出，不从名为 id 的属性推断。省略的字段不产生 cell write。显式 Null 是映射错误，空字节仍是有效值。删除旧 cell 必须使用明确的 HBase 删除操作，不由 None 推导。向已有 row 写部分字段不承诺清除未出现的旧字段。
 
-这个适配直接实现 Encoder/Decoder，不先制造 SQL Row，也不要求业务类型继承 HBase 接口。更多 cell 格式由后续真实使用扩展，不建立注册表或任意运行时插件。HBase 的 Result 确实保留 cell 的 family、qualifier、timestamp 与 bytes，参见[官方实现](https://github.com/apache/hbase/blob/master/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Result.java)。
+该设计保留 HBase 自身的数据模型。更多 cell 格式由后续真实使用扩展，不建立注册表或任意运行时插件。HBase 的 Result 确实保留 cell 的 family、qualifier、timestamp 与 bytes，参见[官方实现](https://github.com/apache/hbase/blob/master/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Result.java)。
 
 ## 9. Cosmos DB for NoSQL：文档与分页检验
 
@@ -695,20 +628,21 @@ Replace/Delete 的 String 为显式 item id，最后的 String? 为 ifMatch。�
 | 逻辑访问对象 | 原生连接的异步 owner | 集群客户端及 table 句柄 | 客户端及 container 句柄 |
 | 请求 | SQL Statement + SqlArguments | Get/Scan/Put | 点操作、CosmosQuery、分区批次 |
 | 输出 | ResultSet（Row 流）或 UpdateResult | HBaseRow/cells 流 | CosmosItem、JsonValue 流/页 |
-| record 读取 | Rows.decodeFromRow | 显式地址/格式/版本的 Decoder | Json.decodeFromValue |
+| record 读取 | Rows.decodeFromRow | 显式地址、格式与版本映射 | Json.decodeFromValue |
 | record 写入 | encodeToRow 后明确绑定字段顺序 | encodeToPut，key 显式传入 | Json.encodeToValue 后明确选择 create/replace |
 | 空值 | SQL NULL | 无通用 NULL；缺 cell 与空 bytes 分开 | 缺属性与 JSON null 分开 |
 | 并发 | 单路会话/活动结果占用 | 独立请求可并行 | 独立请求可并行 |
 | 原子性 | SQL 会话事务 | 原生单行操作语义 | 同容器、同分区批次 |
 | 取消 | native 中断 + 等待 worker 收尾 | 取消本地 RPC/扫描，不伪造远端撤销 | 停止本地等待/后续页，不伪造写入撤销 |
 
-三个模型共用结果流、资源合同和 codec，不需要某个驱动谎称支持别的模型。SQLite 用于核对调用路径与原生 API 的对应关系；HBase 检查二进制地址与多版本，Cosmos 检查嵌套文档、分页和受限事务。此处为设计审查，不是运行验证。
+三个模型共用结果流和资源生命周期，record 映射由各后端的数据形状决定。SQLite 用于核对调用路径与原生 API 的对应关系；HBase 检查二进制地址与多版本，Cosmos 检查嵌套文档、分页和受限事务。此处为设计审查，不是运行验证。
 
 ### 10.2 同一个 record 的具体映射案例
 
 ```scoop
 public struct Profile(val name: String, val score: Long, val note: String?) {
-    public companion object : ValueEncoder<Profile>, ValueDecoder<Profile> {}
+    @GenerateWith("scoop.db", ["RowWriter<Profile>", "RowReader<Profile>"])
+    public companion object: RowWriter<Profile>, RowReader<Profile>
 }
 
 val profile = Profile("Ada", 7L, None)
@@ -718,9 +652,9 @@ val profile = Profile("Ada", 7L, None)
 | --- | --- | --- |
 | SQLite | 查询返回 `name=TEXT("Ada")`、`score=INTEGER(7)`、`note=NULL`；驱动形成 Text、Signed、Null 三列 | Rows.decodeFromRow 得到 profile；encodeToRow 默认省略 note。两个参数的 INSERT 可以只绑定 name/score；三个参数的 INSERT 必须显式选择 emitNull 或补充 Null，不能把缺参数自动当作 NULL |
 | HBase | 显式映射 name→`info:name`/Utf8、score→`info:score`/Int64BigEndian、note→`info:note`/Utf8；score 返回两个版本，最新 bytes 为 `00 00 00 00 00 00 00 07`，note 无 cell | Latest 解码得到 profile；原始 HBaseRow 仍有两个版本。encodeToPut 使用外部给定 key，生成 name/score 两个 cell；已有 note 不会因此删除 |
-| Cosmos | 点读取 body 为 `{"id":"p7","tenant":"t1","name":"Ada","score":7,"note":null}`，容器分区路径为 `/tenant` | Json.decodeFromValue 按既有默认未知字段规则忽略 id/tenant，得到 profile。编码 profile 后，应用显式合入 id/tenant 并提供分区键；用 replace 写回时，省略 note 会移除旧属性 |
+| Cosmos | 点读取 body 为 `{"id":"p7","tenant":"t1","name":"Ada","score":7,"note":null}`，容器分区路径为 `/tenant` | 另行提供 JSON 映射后，Json.decodeFromValue 可按 JSON 的未知字段规则忽略 id/tenant，得到 profile。编码 profile 后，应用显式合入 id/tenant 并提供分区键；用 replace 写回时，省略 note 会移除旧属性 |
 
-共用的是 Profile.Companion 的字段编解码。SQLite 参数顺序、HBase 地址/字节格式/row key、Cosmos 身份/分区条件分别由调用方给出；普通 record 本身不承担这些身份含义。字段 codec 若采用不同的二进制、时间或数值表示，应显式选择对应策略，不承诺任意 codec 可无条件跨后端使用。
+三个例子使用同一种业务 record。行映射、cell 映射和文档映射分别选择。SQLite 参数顺序、HBase 地址/字节格式/row key、Cosmos 身份/分区条件分别由调用方给出；普通 record 本身不承担这些身份含义。字段 codec 若采用不同的二进制、时间或数值表示，应显式选择对应策略，不承诺任意 codec 可无条件跨后端使用。
 
 另有三个必须保留的边界案例：SQLite join 的两列都叫 id 时，按列序号 select 并重命名后再解码；HBase 请求两个版本时，不能把它们覆盖成一个 String→Value map；Cosmos 查询返回空页但带 continuation 时，下一次页请求继续，同一 next 最终交付数据或明确 EOF。Cosmos 标量投影可以直接交给标量 JSON codec，不必包装成只有一列的 Row。
 
@@ -728,10 +662,10 @@ val profile = Profile("Ada", 7L, None)
 
 后续实施的普通行为测试使用所属 Cone 的 scoop.test：
 
-1. struct/class 现有 codec 的字段、重命名、默认值、Option 和显式依赖组合；手写 codec/constructor 的异常保留。
+1. struct/class 生成的行映射的字段、重命名、默认值、Option 和显式依赖组合；手写 codec/constructor 的异常保留。
 2. 缺列、显式 Null、空文本、空 bytes、空序列的区别；重复列及显式序号投影；整数边界、精度和错误 path。
 3. Row 编码字段省略后，参数绑定缺值失败；显式 Null 成功；声明序与 SQL 参数序不同仍按显式 fieldOrder 绑定。
-4. 取得 Row/record 后继续 next、关闭流及连接，已交付值仍有效；Decoder 子视图复读不消费源流。
+4. 取得 Row/record 后继续 next、关闭流及连接，已交付值仍有效；RowCell 复读不消费源流。
 5. mapRecords 惰性、转换失败关闭源、双失败保留；两个 next 竞争只接纳一个，EOF 与 close 行为明确。
 
 测试可以使用最小的受控测试实现来制造异步竞争，不为测试增加生产工厂或通用注入框架。
@@ -755,7 +689,7 @@ HBase/Cosmos 在本轮只进行接口和数据案例审查：多版本 cell 不�
 
 后续实施按以下顺序形成可用闭环：
 
-1. 将已经评审的公共/SQL 合同落入数据库库规范，明确稳定值、取消和参数规则；不改现有语言 codec 行为。
+1. 将已经评审的公共/SQL 合同落入数据库库规范，明确稳定值、取消和参数规则；生成方法使用公开 generator 协议。
 2. 实现 Row 数据、Rows 编码/解码和明确的绑定规则，完成普通 Cone 测试。
 3. 接入公共资源/结果流、SQLite 的完整异步调用、取消、关闭与事务；形成 record → 参数 → 执行 → Row → record 的真实闭环。
 4. 完成本机关键竞态验收和使用示例，按独立 workspace 构建库，并由示例 Cone 消费源码依赖。本轮按任务范围仅用本机 scoop.test 验证，不运行跨平台验收。

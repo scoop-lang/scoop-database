@@ -10,9 +10,11 @@ import scoop.test.*
 private struct UserRecord(
     val id: Long,
     val name: String,
-    @Serialize(emitNull = true) val note: String?
+    @DbColumn(emitNull = true) val note: String?,
+    @DbColumn(name = "picture") val avatar: Array<Byte>
 ) {
-    public companion object: ValueEncoder<UserRecord>, ValueDecoder<UserRecord>
+    @GenerateWith("scoop.db", ["RowWriter<UserRecord>", "RowReader<UserRecord>"])
+    public companion object: RowWriter<UserRecord>, RowReader<UserRecord>
 }
 
 @Test
@@ -23,11 +25,20 @@ private class SQLiteStatementTests {
         eventLoop().run {
             SqliteDataSource(SqliteLocation.Memory).connect().useAsync {
                 connection ->
-                executeSql(connection, "CREATE TABLE users(id INTEGER, name TEXT, note TEXT)")
-                connection.prepare("INSERT INTO users(id,name,note) VALUES(?,?,?)").useAsync {
+                executeSql(
+                    connection,
+                    "CREATE TABLE users(id INTEGER, name TEXT, note TEXT, picture BLOB)"
+                )
+                connection.prepare(
+                    "INSERT INTO users(id,name,note,picture) VALUES(?,?,?,?)"
+                ).useAsync {
                     statement ->
-                    val input = Rows.encodeToRow(UserRecord(7L, "Ada", None), UserRecord.Companion)
-                    val arguments = SqlArguments.fromRow(input, ["id", "name", "note"])
+                    val input =
+                        Rows.encodeToRow(
+                            UserRecord(7L, "Ada", None, [(-1).toByte()]),
+                            UserRecord.Companion
+                        )
+                    val arguments = SqlArguments.fromRow(input, ["id", "name", "note", "picture"])
                     when (statement.execute(arguments)) {
                         case SqlResult.Update(val result) -> assertEquals(
                             Some(1L),
@@ -36,7 +47,7 @@ private class SQLiteStatementTests {
                         case SqlResult.Rows(_) -> fail(Some("insert unexpectedly returned rows"))
                     }
                 }
-                connection.prepare("SELECT name,id,note FROM users").useAsync {
+                connection.prepare("SELECT name,picture,id,note FROM users").useAsync {
                     statement ->
                     val rows = resultRows(statement)
                     val first = rows.next()!!
@@ -45,6 +56,7 @@ private class SQLiteStatementTests {
                     assertEquals(7L, user.id)
                     assertEquals("Ada", user.name)
                     assertEquals(None, user.note)
+                    assertEquals((-1).toByte(), user.avatar[0L])
                     assertEquals(0L, querySqlAfterClosing(rows, connection).size)
                 }
             }
@@ -133,16 +145,13 @@ private class SQLiteStatementTests {
                         "SELECT ? AS nil, ? AS empty, ? AS bytes, ? AS text, ? AS flag, ? AS real",
                         args
                     )[0L]
-                assertTrue(Rows.valueDecoder(row.get("nil")).singleValue().isNull())
-                assertFalse(Rows.valueDecoder(row.get("empty")).singleValue().isNull())
-                assertEquals(0L, RowBytesCodec.decode(Rows.valueDecoder(row.get("empty"))).size)
-                assertEquals(
-                    (-1).toByte(),
-                    RowBytesCodec.decode(Rows.valueDecoder(row.get("bytes")))[1L]
-                )
+                assertTrue(RowCell(row.get("nil")).isNull())
+                assertFalse(RowCell(row.get("empty")).isNull())
+                assertEquals(0L, RowCell(row.get("empty")).readBytes().size)
+                assertEquals((-1).toByte(), RowCell(row.get("bytes")).readBytes()[1L])
                 assertEquals("a\u0000b", rowText(row, "text"))
                 assertEquals(1L, rowLong(row, "flag"))
-                assertEquals(1.5, Rows.valueDecoder(row.get("real")).singleValue().readDouble())
+                assertEquals(1.5, RowCell(row.get("real")).readDouble())
             }
         }
     }

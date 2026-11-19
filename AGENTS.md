@@ -4,7 +4,7 @@
 
 ## 项目边界
 
-本仓库维护三个普通 Scoop Cone：`packages/scoop.db`、`packages/scoop.db.sql`、`packages/scoop.db.sqlite`。根 `Cone.toml` 是 workspace；`examples/records` 是 executable 示例成员。三个库全部独立于 Scoop 编译器仓库和 sysroot，库间使用显式相对 path 依赖，系统库使用安装的 Scoop 工具链。
+本仓库维护三个普通 Scoop Cone：`packages/scoop.db`、`packages/scoop.db.sql`、`packages/scoop.db.sqlite`。根 `Cone.toml` 是 workspace；`examples/records` 是 executable 示例成员。`generator/` 是独立的 Rust 宿主程序 `scoop-db-generator`，使用协议 v2。三个库全部独立于 Scoop 编译器仓库和 sysroot，库间使用显式相对 path 依赖，系统库使用安装的 Scoop 工具链。
 
 先读 [README](README.md)、[数据库规范](docs/specs/SCOOP-DB-SPEC.md)和受影响库的说明。公开行为或资源合同变更先修改规范，再修改实现、调用方和文档。不要增加 ORM、反射、数据库宏或编译器/runtime 特例来解决普通库问题。
 
@@ -12,7 +12,7 @@ SQLite 使用 `packages/scoop.db.sqlite/vendor/sqlite` 内的官方 amalgamation
 
 ## 验证
 
-完成一批变更后，先执行 `scoop fmt --workspace`、`scoop fmt --workspace --check` 和 `scoop check --workspace`；native bridge 变更还需执行 README 中的 C 严格警告检查，再运行相关库的 `scoop test --release`。涉及库依赖、native 构建或公开接口时运行三个库测试和 `scoop run --release examples/records`。
+涉及行映射生成时按 README 构建宿主程序，并向 check/build/test/run 传入 `--generator "$dbgen"`。修改生成器后先执行 `cargo fmt` 和 `cargo clippy --all-targets`（在 `generator/` 目录内）。完成一批变更后，先执行 `scoop fmt --workspace`、`scoop fmt --workspace --check` 和 `scoop check --workspace`；native bridge 变更还需执行 README 中的 C 严格警告检查，再运行相关库的 `scoop test --release`。涉及库依赖、native 构建或公开接口时运行三个库测试和 `scoop run --release examples/records`。
 
 普通行为测试放在所属 Cone 的 `tests/`，使用 `scoop.test`；不复制一套编译器 fixture runner。用现有真实调用验证，不通过删除或隐藏系统库、源码、工具来测试复用。原始日志放仓库外，文档仅记录验证范围、结果和实际限制。
 

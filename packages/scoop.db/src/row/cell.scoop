@@ -1,0 +1,103 @@
+package scoop.db.row
+
+/** A stable column or sequence element. Conversions preserve its location on failure. */
+public struct RowCell(
+    val value: RowValue,
+    val path: String = "",
+    val options: RowDecodingOptions = RowDecodingOptions()
+) {
+    public fun fail(message: String): Nothing = throw RowMappingException(path, message)
+    public fun isNull(): Boolean =
+        when (value) {
+            case RowValue.Null -> true
+            else -> false
+        }
+    public fun readBoolean(): Boolean =
+        when (value) {
+            case RowValue.Boolean(val result) -> result
+            else -> fail("expected a Boolean")
+        }
+    public fun readLong(): Long =
+        when (value) {
+            case RowValue.Signed(val result) -> result
+            case RowValue.Unsigned(val result) -> {
+                if (result > Long.MAX_VALUE.toULong())
+                    fail("integer is out of range")
+                result.toLong()
+            }
+            else -> fail("expected an integer")
+        }
+    public fun readULong(): ULong =
+        when (value) {
+            case RowValue.Unsigned(val result) -> result
+            case RowValue.Signed(val result) -> {
+                if (result < 0L)
+                    fail("integer is out of range")
+                result.toULong()
+            }
+            else -> fail("expected an integer")
+        }
+    private fun signed(minimum: Long, maximum: Long): Long {
+        val result = readLong()
+        if (result < minimum || result > maximum)
+            fail("integer is out of range")
+        return result
+    }
+    private fun unsigned(maximum: ULong): ULong {
+        val result = readULong()
+        if (result > maximum)
+            fail("integer is out of range")
+        return result
+    }
+    public fun readInt8(): Int8 = signed(Int8.MIN_VALUE.toLong(), Int8.MAX_VALUE.toLong()).toByte()
+    public fun readInt16(): Int16 =
+        signed(Int16.MIN_VALUE.toLong(), Int16.MAX_VALUE.toLong()).toShort()
+    public fun readInt(): Int = signed(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
+    public fun readUInt8(): UInt8 = unsigned(UInt8.MAX_VALUE.toULong()).toUByte()
+    public fun readUInt16(): UInt16 = unsigned(UInt16.MAX_VALUE.toULong()).toUShort()
+    public fun readUInt(): UInt = unsigned(UInt.MAX_VALUE.toULong()).toUInt()
+    public fun readFloat(): Float =
+        when (value) {
+            case RowValue.Float32(val result) -> result
+            else -> fail("expected a Float")
+        }
+    public fun readDouble(): Double =
+        when (value) {
+            case RowValue.Float32(val result) -> result.toDouble()
+            case RowValue.Float64(val result) -> result
+            else -> fail("expected a Double")
+        }
+    public fun readString(): String =
+        when (value) {
+            case RowValue.Text(val result) -> result
+            else -> fail("expected text")
+        }
+    public fun readChar(): Char {
+        val text = readString()
+        if (text.charLength != 1L)
+            fail("expected one character")
+        return text.getCharAt(0L)
+    }
+    public fun readBytes(): Array<Byte> =
+        when (value) {
+            case RowValue.Bytes(val result) -> result
+            else -> fail("expected binary data")
+        }
+    public fun <T> readOptional(convert: (RowCell) -> T): T? =
+        if (isNull())
+            None
+        else
+            Some(convert(this))
+    public fun <T> readArray(convert: (RowCell) -> T): Array<T> =
+        when (value) {
+            case RowValue.Sequence(val items) -> Array<T>(items.size) {
+                index -> convert(RowCell(items[index], rowPath(path, index.toString()), options))
+            }
+            else -> fail("expected a sequence")
+        }
+    public fun <T> readRecord(reader: RowReader<T>): T =
+        when (value) {
+            case RowValue.Record(val row) -> RowInput(row, path, options).read(reader)
+            else -> fail("expected a record")
+        }
+}

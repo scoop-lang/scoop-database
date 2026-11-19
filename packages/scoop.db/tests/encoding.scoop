@@ -3,104 +3,137 @@ package scoop.db.tests
 import scoop.db.row.*
 import scoop.test.*
 
-private class CustomWriter(private val write: (Encoder) -> Unit): ValueEncoder<Unit> {
-    public override fun encode(value: Unit, encoder: Encoder): Unit = write(encoder)
+private struct Code(val text: String) {
+    public companion object: ColumnCodec<Code> {
+        public override fun toValue(value: Code): RowValue = RowValue.Text(value.text)
+        public override fun fromValue(cell: RowCell): Code = Code(cell.readString())
+    }
+}
+
+private struct Tagged(val code: Code, val active: Boolean)
+
+private object IntegerFlag: ColumnCodec<Boolean> {
+    public override fun toValue(value: Boolean): RowValue =
+        RowValue.Signed(
+            if (value)
+                1L
+            else
+                0L
+        )
+    public override fun fromValue(cell: RowCell): Boolean =
+        when (cell.readLong()) {
+            case 0L -> false
+            case 1L -> true
+            else -> cell.fail("expected 0 or 1")
+        }
+}
+
+@GenerateWith("scoop.db", ["RowWriter<Tagged>", "RowReader<Tagged>"])
+private class TaggedMapping(private val flag: ColumnCodec<Boolean>): RowWriter<Tagged>, RowReader<
+    Tagged
+>
+
+private struct Batch<T>(val values: Array<T?>)
+
+@GenerateWith("scoop.db", ["RowWriter<Batch<T>>", "RowReader<Batch<T>>"])
+private class BatchMapping<T>(private val element: ColumnCodec<T>): RowWriter<Batch<T>>, RowReader<
+    Batch<T>
+>
+
+private struct Manual(val value: Long) {
+    @GenerateWith("scoop.db", ["RowReader<Manual>", "RowWriter<Manual>"])
+    public companion object: RowReader<Manual>, RowWriter<Manual> {
+        public override fun writeRow(value: Manual, row: RowBuilder) {
+            row.put("value", RowValue.Unsigned(value.value.toULong()))
+        }
+    }
+}
+
+private object ManualId: RowReader<Long> {
+    public override fun readRow(row: RowInput): Long = row.required("id").readLong()
+}
+
+private class FailingMapping(val failure: Throwable): RowReader<Unit>, RowWriter<Unit> {
+    public override fun writeRow(value: Unit, row: RowBuilder): Unit = throw failure
+    public override fun readRow(row: RowInput): Unit = throw failure
 }
 
 @Test
-private class RowEncodingTests {
+private class RowWriterTests {
     @Test
-    fun `root and child completion rules reject incomplete values`() {
-        assertFailsWith<EncodingException> { Rows.encodeToRow(1L, Long.Companion) }
-        assertFailsWith<EncodingException> {
-            Rows.encodeToRow(Unit, CustomWriter { writer -> writer.keyed() })
-        }
-        assertFailsWith<EncodingException> {
-            Rows.encodeToRow(
-                Unit,
-                CustomWriter {
-                    writer ->
-                    val keyed = writer.keyed()
-                    keyed.field("pending").singleValue()
-                    keyed.end()
-                }
-            )
-        }
-        assertFailsWith<EncodingException> {
-            Rows.encodeToRow(
-                Unit,
-                CustomWriter {
-                    writer ->
-                    val keyed = writer.keyed()
-                    keyed.end()
-                    keyed.field("late").singleValue().writeLong(1L)
-                }
-            )
-        }
-    }
-
-    @Test
-    fun `shared encoder views cannot duplicate keys or scalar writes`() {
-        assertFailsWith<EncodingException> {
-            Rows.encodeToRow(
-                Unit,
-                CustomWriter {
-                    writer ->
-                    writer.keyed().field("same").singleValue().writeLong(1L)
-                    writer.keyed().field("same")
-                }
-            )
-        }
-        assertFailsWith<EncodingException> {
-            Rows.encodeToRow(
-                Unit,
-                CustomWriter {
-                    writer ->
-                    val child = writer.keyed().field("one")
-                    child.singleValue().writeLong(1L)
-                    child.singleValue().writeLong(2L)
-                }
-            )
-        }
-        assertFailsWith<EncodingException> {
-            Rows.encodeToRow(
-                Unit,
-                CustomWriter {
-                    writer ->
-                    writer.keyed();
-                    writer.unkeyed()
-                }
-            )
-        }
-    }
-
-    @Test
-    fun `end permits append before commit and retained writers cannot alter a published row`() {
-        val retained = ArrayList<Encoder>()
-        val row =
-            Rows.encodeToRow(
-                Unit,
-                CustomWriter {
-                    writer ->
-                    retained.add(writer)
-                    val keyed = writer.keyed()
-                    keyed.end()
-                    keyed.field("value").singleValue().writeLong(4L)
-                    writer.keyed().end()
-                }
-            )
-        assertEquals(4L, Rows.valueDecoder(row.get("value")).singleValue().readLong())
-        assertFailsWith<EncodingException> { retained[0L].keyed().field("after") }
+    fun `builder snapshots preserve order and reject duplicate columns`() {
+        val builder = RowBuilder()
+        builder.put("one", RowValue.Signed(1L))
+        val row = builder.build()
+        assertFailsWith<AmbiguousColumnException> { builder.put("one", RowValue.Null) }
+        builder.put("two", RowValue.Null)
         assertEquals(1L, row.schema.columns.size)
+        assertEquals(1L, RowCell(row.get("one")).readLong())
+        assertEquals("two", builder.build().schema.columns[1L].name)
     }
 
     @Test
-    fun `user codec failures retain their original identity`() {
+    fun `generated mappings use a column companion and an injected database conversion`() {
+        val mapping = TaggedMapping(IntegerFlag)
+        val row = Rows.encodeToRow(Tagged(Code("A"), true), mapping)
+        assertEquals("A", RowCell(row.get("code")).readString())
+        assertEquals(1L, RowCell(row.get("active")).readLong())
+        val copy = Rows.decodeFromRow(row, mapping)
+        assertEquals("A", copy.code.text)
+        assertTrue(copy.active)
+    }
+
+    @Test
+    fun `an open generic mapper composes its column conversion with arrays and nulls`() {
+        val mapping = BatchMapping<Boolean>(IntegerFlag)
+        val row = Rows.encodeToRow(Batch<Boolean>([Some(true), None, Some(false)]), mapping)
+        val cells =
+            RowCell(row.get("values")).readArray<Long?> {
+                item -> item.readOptional<Long> { cell -> cell.readLong() }
+            }
+        assertEquals(Some(1L), cells[0L])
+        assertEquals(None, cells[1L])
+        val decoded = Rows.decodeFromRow(row, mapping)
+        assertEquals(Some(false), decoded.values[2L])
+    }
+
+    @Test
+    fun `a generated reader works alongside a handwritten writer`() {
+        val row = Rows.encodeToRow(Manual(9L), Manual.Companion)
+        when (row.get("value")) {
+            case RowValue.Unsigned(val n) -> assertEquals(9uL, n)
+            else -> fail(Some("expected the handwritten representation"))
+        }
+        assertEquals(9L, Rows.decodeFromRow(row, Manual.Companion).value)
+    }
+
+    @Test
+    fun `strict reads also check columns left unread by a handwritten mapper`() {
+        val builder = RowBuilder()
+        builder.put("id", RowValue.Signed(9L))
+        builder.put("extra", RowValue.Null)
+        val row = builder.build()
+        assertEquals(9L, Rows.decodeFromRow(row, ManualId))
+        val error =
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(row, ManualId, RowDecodingOptions(UnknownColumnPolicy.Reject))
+            }
+        assertEquals("/extra", error.path)
+    }
+
+    @Test
+    fun `user mapping failures keep their identity`() {
         val failure = IllegalStateException(Some("user failure"))
         val caught =
             assertFailsWith<IllegalStateException> {
-                Rows.encodeToRow(Unit, CustomWriter { throw failure })
+                Rows.decodeFromRow(RowBuilder().build(), FailingMapping(failure))
             }
         assertTrue(caught === failure)
+        assertSame(
+            failure,
+            assertFailsWith<IllegalStateException> {
+                Rows.encodeToRow(Unit, FailingMapping(failure))
+            }
+        )
     }
 }

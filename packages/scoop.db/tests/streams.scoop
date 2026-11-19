@@ -90,7 +90,7 @@ private class RecordStreamTests {
             assertTrue(stream.isClosed)
             assertEquals(1L, source.closes)
         }
-        assertTrue(Rows.valueDecoder(row.get("note")).singleValue().isNull())
+        assertTrue(RowCell(row.get("note")).isNull())
     }
 
     @Test

@@ -1,0 +1,10 @@
+schema = 1
+
+[cone]
+group = "scoop.database.tests"
+name = "invalid-mappings"
+version = "0.1.0"
+kind = "library"
+
+[dependencies]
+"scoop:scoop.db" = { path = "../../../packages/scoop.db", version = "0.1.0" }

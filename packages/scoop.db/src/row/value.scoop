@@ -1,24 +1,38 @@
 package scoop.db.row
 
+import scoop.collections.HashMap
+
 /** Column metadata is descriptive; it does not determine a value's runtime kind. */
 public struct Column(val name: String, val nativeTypeName: String? = None)
 
 /** Immutable ordered metadata. Duplicate names remain accessible by ordinal. */
-public class RowSchema private constructor(public val columns: Array<Column>) {
+public class RowSchema private constructor(
+    public val columns: Array<Column>,
+    private val indices: HashMap<String, Long>,
+    internal val firstDuplicate: String?
+) {
     public fun indexOf(name: String): Long? {
-        var result: Long? = None
-        for (index in 0L ..< columns.size) {
-            if (columns[index].name == name) {
-                if (result != None)
-                    throw AmbiguousColumnException(name)
-                result = Some(index)
-            }
-        }
-        return result
+        val index = indices[name]
+        if (index == Some(-1L))
+            throw AmbiguousColumnException(name)
+        return index
     }
 
     public companion object {
-        public fun fromColumns(columns: List<Column>): RowSchema = RowSchema(columns.toArray())
+        public fun fromColumns(columns: List<Column>): RowSchema {
+            val snapshot = columns.toArray()
+            val indices = HashMap<String, Long>()
+            var duplicate: String? = None
+            for (index in 0L ..< snapshot.size) {
+                val name = snapshot[index].name
+                if (indices.put(name, index) != None) {
+                    indices.put(name, -1L)
+                    if (duplicate == None)
+                        duplicate = Some(name)
+                }
+            }
+            return RowSchema(snapshot, indices, duplicate)
+        }
     }
 }
 

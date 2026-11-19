@@ -4,38 +4,44 @@ import scoop.db.row.*
 import scoop.test.*
 
 private struct Address(val city: String, val codes: Array<Long>) {
-    public companion object: ValueEncoder<Address>, ValueDecoder<Address>
+    @GenerateWith("scoop.db", ["RowWriter<Address>", "RowReader<Address>"])
+    public companion object: RowWriter<Address>, RowReader<Address>
 }
 
-private struct Person(val id: Long, val address: Address, val note: String?) {
-    public companion object: ValueEncoder<Person>, ValueDecoder<Person>
+private class Person(val id: Long, val address: Address, val note: String?) {
+    @GenerateWith("scoop.db", ["RowWriter<Person>", "RowReader<Person>"])
+    public companion object: RowWriter<Person>, RowReader<Person>
 }
 
 private struct Defaults(
-    @Serialize(rename = "n/~") val name: String = "guest",
-    val note: String? = None
+    @DbColumn(name = "n/~") val name: String = "guest",
+    val note: String? = Some(name),
+    @DbColumn(ignore = true) val hidden: Int = 42
 ) {
-    public companion object: ValueEncoder<Defaults>, ValueDecoder<Defaults>
+    @GenerateWith("scoop.db", ["RowWriter<Defaults>", "RowReader<Defaults>"])
+    public companion object: RowWriter<Defaults>, RowReader<Defaults>
 }
 
-internal struct ExplicitNull(@Serialize(emitNull = true) val note: String?) {
-    public companion object: ValueEncoder<ExplicitNull>, ValueDecoder<ExplicitNull>
+private fun failingDefault(): Long = throw IllegalStateException(Some("default evaluated"))
+
+private struct CheckedDefault(val id: Long = failingDefault()) {
+    @GenerateWith("scoop.db", ["RowReader<CheckedDefault>"])
+    public companion object: RowReader<CheckedDefault>
 }
 
-private struct BinaryRecord(val data: Array<Byte>)
+internal struct ExplicitNull(@DbColumn(emitNull = true) val note: String?) {
+    @GenerateWith("scoop.db", ["RowWriter<ExplicitNull>", "RowReader<ExplicitNull>"])
+    public companion object: RowWriter<ExplicitNull>, RowReader<ExplicitNull>
+}
 
-private object BinaryRecordCodec: ValueEncoder<BinaryRecord>, ValueDecoder<BinaryRecord> {
-    public override fun encode(value: BinaryRecord, encoder: Encoder) {
-        val keyed = encoder.keyed()
-        RowBytesCodec.encode(value.data, keyed.field("data"))
-        keyed.end()
-    }
-    public override fun decode(decoder: Decoder): BinaryRecord {
-        val keyed = decoder.keyed()
-        val value = RowBytesCodec.decode(keyed.required("data"))
-        keyed.end()
-        return BinaryRecord(value)
-    }
+private struct Required(@DbColumn(required = true) val note: String? = Some("unused")) {
+    @GenerateWith("scoop.db", ["RowWriter<Required>", "RowReader<Required>"])
+    public companion object: RowWriter<Required>, RowReader<Required>
+}
+
+private struct Payload(val bytes: Array<Byte>, val flags: Array<Boolean?>) {
+    @GenerateWith("scoop.db", ["RowWriter<Payload>", "RowReader<Payload>"])
+    public companion object: RowWriter<Payload>, RowReader<Payload>
 }
 
 private fun makeRow(names: List<String>, values: List<RowValue>): Row {
@@ -48,41 +54,133 @@ private fun makeRow(names: List<String>, values: List<RowValue>): Row {
 @Test
 private class RowMappingTests {
     @Test
-    fun `nested records and sequences round trip through existing companions`() {
+    fun `generated class and nested struct round trip in declaration order`() {
         val row = Rows.encodeToRow(Person(7L, Address("Paris", [1L, 2L]), None), Person.Companion)
+        assertEquals("id", row.schema.columns[0L].name)
+        assertEquals("address", row.schema.columns[1L].name)
         assertEquals(None, row.schema.indexOf("note"))
         val value = Rows.decodeFromRow(row, Person.Companion)
         assertEquals(7L, value.id)
         assertEquals("Paris", value.address.city)
         assertEquals(2L, value.address.codes[1L])
         assertEquals(None, value.note)
-        val reused = Rows.decodeFromRow(row, Person.Companion)
-        assertEquals(1L, reused.address.codes[0L])
+        assertEquals(1L, Rows.decodeFromRow(row, Person.Companion).address.codes[0L])
     }
 
     @Test
-    fun `missing fields use defaults while explicit null reaches the field codec`() {
+    fun `only missing columns evaluate defaults and ignored fields stay out of the row`() {
         val empty = makeRow([], [])
-        assertEquals("guest", Rows.decodeFromRow(empty, Defaults.Companion).name)
-        val nullName = makeRow(["n/~"], [RowValue.Null])
+        val defaults = Rows.decodeFromRow(empty, Defaults.Companion)
+        assertEquals("guest", defaults.name)
+        assertEquals(Some("guest"), defaults.note)
+        val named = Rows.decodeFromRow(makeRow(["n/~"], [RowValue.Text("Ada")]), Defaults.Companion)
+        assertEquals(Some("Ada"), named.note)
+        val absent = Rows.decodeFromRow(makeRow(["note"], [RowValue.Null]), Defaults.Companion)
+        assertEquals(None, absent.note)
+        val encoded = Rows.encodeToRow(Defaults("changed", None, 9), Defaults.Companion)
+        assertEquals(None, encoded.schema.indexOf("hidden"))
+        val decoded = Rows.decodeFromRow(encoded, Defaults.Companion)
+        assertEquals(42, decoded.hidden)
+        assertEquals("changed", decoded.name)
+        val failure =
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(makeRow(["n/~"], [RowValue.Null]), Defaults.Companion)
+            }
+        assertEquals("/n~1~0", failure.path)
+    }
+
+    @Test
+    fun `strict column checks precede constructor default evaluation`() {
+        val strict = RowDecodingOptions(UnknownColumnPolicy.Reject)
         val error =
-            assertFailsWith<DecodingException> { Rows.decodeFromRow(nullName, Defaults.Companion) }
-        assertEquals("/n~1~0", error.path)
-        val explicit = Rows.encodeToRow(ExplicitNull(None), ExplicitNull.Companion)
-        assertTrue(Rows.valueDecoder(explicit.get("note")).singleValue().isNull())
-        when (Rows.decoder(empty).keyed().optional("note")) {
-            case None -> {}
-            case Some(_) -> fail(Some("missing field returned a decoder"))
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(
+                    makeRow(["extra"], [RowValue.Null]),
+                    CheckedDefault.Companion,
+                    strict
+                )
+            }
+        assertEquals("/extra", error.path)
+        assertFailsWith<IllegalStateException> {
+            Rows.decodeFromRow(makeRow([], []), CheckedDefault.Companion, strict)
         }
+        val supplied = makeRow(["id"], [RowValue.Signed(4L)])
+        assertEquals(4L, Rows.decodeFromRow(supplied, CheckedDefault.Companion, strict).id)
+    }
+
+    @Test
+    fun `required and emitNull both keep explicit SQL null but only required rejects absence`() {
+        val explicit = Rows.encodeToRow(ExplicitNull(None), ExplicitNull.Companion)
+        assertTrue(RowCell(explicit.get("note")).isNull())
+        assertEquals(None, Rows.decodeFromRow(makeRow([], []), ExplicitNull.Companion).note)
+        val required = Rows.encodeToRow(Required(None), Required.Companion)
+        assertTrue(RowCell(required.get("note")).isNull())
+        assertEquals(None, Rows.decodeFromRow(required, Required.Companion).note)
+        val error =
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(makeRow([], []), Required.Companion)
+            }
+        assertEquals("/note", error.path)
+    }
+
+    @Test
+    fun `binary columns and nullable sequence elements retain their database kind`() {
+        val row =
+            Rows.encodeToRow(
+                Payload([1.toByte(), (-1).toByte()], [Some(true), None]),
+                Payload.Companion
+            )
+        assertEquals((-1).toByte(), RowCell(row.get("bytes")).readBytes()[1L])
+        val value = Rows.decodeFromRow(row, Payload.Companion)
+        assertEquals(Some(true), value.flags[0L])
+        assertEquals(None, value.flags[1L])
+        val empty = Rows.encodeToRow(Payload([], []), Payload.Companion)
+        assertFalse(RowCell(empty.get("bytes")).isNull())
+        assertEquals(0L, Rows.decodeFromRow(empty, Payload.Companion).bytes.size)
+        assertFailsWith<RowMappingException> { RowCell(RowValue.Sequence([])).readBytes() }
+    }
+
+    @Test
+    fun `unknown policy and errors propagate through nested rows and arrays`() {
+        val strict = RowDecodingOptions(UnknownColumnPolicy.Reject)
+        val inner =
+            makeRow(
+                ["city", "codes", "x/~"],
+                [RowValue.Text("Paris"), RowValue.Sequence([]), RowValue.Null]
+            )
+        val row = makeRow(["id", "address"], [RowValue.Signed(1L), RowValue.Record(inner)])
+        assertEquals("Paris", Rows.decodeFromRow(row, Person.Companion).address.city)
+        val unknown =
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(row, Person.Companion, strict)
+            }
+        assertEquals("/address/x~1~0", unknown.path)
+        val wrong =
+            makeRow(
+                ["codes", "city"],
+                [RowValue.Sequence([RowValue.Text("7")]), RowValue.Text("X")]
+            )
+        val broken = makeRow(["address", "id"], [RowValue.Record(wrong), RowValue.Signed(1L)])
+        assertEquals(
+            "/address/codes/0",
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(broken, Person.Companion)
+            }.path
+        )
     }
 
     @Test
     fun `duplicate names require an explicit ordinal projection`() {
         val row = makeRow(["id", "id"], [RowValue.Signed(1L), RowValue.Signed(2L)])
         assertFailsWith<AmbiguousColumnException> { row.get("id") }
-        assertFailsWith<DecodingException> { Rows.decoder(row).keyed() }
+        assertEquals(
+            "/id",
+            assertFailsWith<RowMappingException> {
+                Rows.decodeFromRow(row, Defaults.Companion)
+            }.path
+        )
         val projected = row.select([ColumnSelection("left", 0L), ColumnSelection("right", 1L)])
-        assertEquals(2L, Rows.valueDecoder(projected.get("right")).singleValue().readLong())
+        assertEquals(2L, RowCell(projected.get("right")).readLong())
         assertFailsWith<AmbiguousColumnException> {
             row.select([ColumnSelection("same", 0L), ColumnSelection("same", 1L)])
         }
@@ -91,7 +189,7 @@ private class RowMappingTests {
     }
 
     @Test
-    fun `row construction snapshots mutable lists and validates shape`() {
+    fun `row construction snapshots lists and validates shape`() {
         val columns = ArrayList<Column>()
         columns.add(Column("original"))
         val schema = RowSchema.fromColumns(columns)
@@ -100,71 +198,26 @@ private class RowMappingTests {
         values.add(RowValue.Text("kept"))
         val row = Row.fromValues(schema, values)
         values.clear()
-        assertEquals("kept", Rows.valueDecoder(row.get("original")).singleValue().readString())
+        assertEquals("kept", RowCell(row.get("original")).readString())
         assertFailsWith<IllegalArgumentException> { Row.fromValues(schema, []) }
     }
 
     @Test
-    fun `binary is explicit and remains distinct from null and a byte sequence`() {
-        val row = Rows.encodeToRow(BinaryRecord([1.toByte(), (-1).toByte()]), BinaryRecordCodec)
-        val value = Rows.decodeFromRow(row, BinaryRecordCodec)
-        assertEquals((-1).toByte(), value.data[1L])
-        val empty = Rows.encodeToRow(BinaryRecord([]), BinaryRecordCodec)
-        assertEquals(0L, Rows.decodeFromRow(empty, BinaryRecordCodec).data.size)
-        assertFalse(Rows.valueDecoder(empty.get("data")).singleValue().isNull())
-        assertFailsWith<DecodingException> {
-            RowBytesCodec.decode(Rows.valueDecoder(RowValue.Sequence([])))
-        }
-    }
-
-    @Test
-    fun `numeric reads are exact and failures leave the value reusable`() {
-        val large = Rows.valueDecoder(RowValue.Unsigned(ULong.MAX_VALUE)).singleValue()
-        assertFailsWith<DecodingException> { large.readLong() }
+    fun `numeric reads are exact and failures leave the cell reusable`() {
+        val large = RowCell(RowValue.Unsigned(ULong.MAX_VALUE))
+        assertFailsWith<RowMappingException> { large.readLong() }
         assertEquals(ULong.MAX_VALUE, large.readULong())
-        val negative = Rows.valueDecoder(RowValue.Signed(-1L)).singleValue()
-        assertFailsWith<DecodingException> { negative.readULong() }
-        assertFailsWith<DecodingException> { negative.readBoolean() }
-        assertFailsWith<DecodingException> { negative.readDouble() }
+        val negative = RowCell(RowValue.Signed(-1L))
+        assertFailsWith<RowMappingException> { negative.readULong() }
+        assertFailsWith<RowMappingException> { negative.readBoolean() }
+        assertFailsWith<RowMappingException> { negative.readDouble() }
         assertEquals(-1L, negative.readLong())
-        val precise = Rows.valueDecoder(RowValue.Float32(1.5f)).singleValue()
+        assertEquals(127.toByte(), RowCell(RowValue.Unsigned(127uL)).readInt8())
+        assertFailsWith<RowMappingException> { RowCell(RowValue.Signed(128L)).readInt8() }
+        assertFailsWith<RowMappingException> { RowCell(RowValue.Unsigned(256uL)).readUInt8() }
+        val precise = RowCell(RowValue.Float32(1.5f))
         assertEquals(1.5, precise.readDouble())
         assertEquals(1.5f, precise.readFloat())
-        assertFailsWith<DecodingException> {
-            Rows.valueDecoder(RowValue.Float64(1.5)).singleValue().readFloat()
-        }
-    }
-
-    @Test
-    fun `decoder views have stable children and independent sequence cursors`() {
-        val decoder =
-            Rows.valueDecoder(RowValue.Sequence([RowValue.Signed(1L), RowValue.Signed(2L)]))
-        assertFalse(decoder.singleValue().isNull())
-        assertFailsWith<DecodingException> { decoder.keyed() }
-        val first = decoder.unkeyed()
-        val child = first.element()
-        assertFailsWith<DecodingException> { child.singleValue().readString() }
-        assertEquals(1L, child.singleValue().readLong())
-        assertEquals(1L, decoder.unkeyed().element().singleValue().readLong())
-        assertFailsWith<DecodingException> { first.end() }
-        assertEquals(2L, first.element().singleValue().readLong())
-        first.end()
-        first.end()
-        assertEquals(1L, child.singleValue().readLong())
-        assertFailsWith<DecodingException> { first.element() }
-    }
-
-    @Test
-    fun `reject policy checks accessed fields without consuming them`() {
-        val row = makeRow(["name", "extra/~"], [RowValue.Text("Ada"), RowValue.Null])
-        val view = Rows.decoder(row, RowDecodingOptions(UnknownColumnPolicy.Reject)).keyed()
-        assertEquals(2L, view.keys.size)
-        val child = view.required("name")
-        val error = assertFailsWith<DecodingException> { view.end() }
-        assertEquals("/extra~1~0", error.path)
-        view.required("extra/~")
-        view.end()
-        view.end()
-        assertEquals("Ada", child.singleValue().readString())
+        assertFailsWith<RowMappingException> { RowCell(RowValue.Float64(1.5)).readFloat() }
     }
 }

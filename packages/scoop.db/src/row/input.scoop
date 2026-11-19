@@ -1,0 +1,76 @@
+package scoop.db.row
+
+/** Named access to a stable row, with the policy and path inherited by nested records. */
+public class RowInput internal constructor(
+    private val row: Row,
+    public val path: String,
+    private val options: RowDecodingOptions
+) {
+    private var visited: MutableArray<Boolean>? =
+        if (options.unknownColumns == UnknownColumnPolicy.Reject)
+            Some(MutableArray<Boolean>(row.schema.columns.size) { false })
+        else
+            None
+
+    init {
+        when (row.schema.firstDuplicate) {
+            case Some(val name) -> throw RowMappingException(
+                rowPath(path, name),
+                "ambiguous column"
+            )
+            case None -> {}
+        }
+    }
+
+    public fun optional(name: String): RowCell? =
+        when (row.schema.indexOf(name)) {
+            case Some(val index) -> {
+                when (visited) {
+                    case Some(val marks) -> {
+                        marks[index] = true
+                    }
+                    case None -> {}
+                }
+                Some(RowCell(row.get(index), rowPath(path, name), options))
+            }
+            case None -> None
+        }
+
+    public fun required(name: String): RowCell =
+        optional(name) ?: throw RowMappingException(rowPath(path, name), "missing required column")
+
+    internal fun <T> read(reader: RowReader<T>): T {
+        val value = reader.readRow(this)
+        finish()
+        return value
+    }
+
+    public fun finish() {
+        when (visited) {
+            case Some(val marks) -> {
+                for (index in 0L ..< marks.size) {
+                    if (!marks[index])
+                        throw RowMappingException(
+                            rowPath(path, row.schema.columns[index].name),
+                            "unknown column"
+                        )
+                }
+                visited = None
+            }
+            case None -> {}
+        }
+    }
+}
+
+internal fun rowPath(parent: String, name: String): String {
+    val result = StringBuilder()
+    result.append(parent).append("/")
+    for (character in name) {
+        when (character) {
+            case '~' -> result.append("~0")
+            case '/' -> result.append("~1")
+            else -> result.append(character)
+        }
+    }
+    return result.toString()
+}

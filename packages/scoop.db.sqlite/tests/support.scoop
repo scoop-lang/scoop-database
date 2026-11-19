@@ -52,11 +52,9 @@ internal suspend fun resultRows(
         case SqlResult.Update(_) -> fail(Some("expected rows"))
     }
 
-internal fun rowLong(row: Row, name: String): Long =
-    Rows.valueDecoder(row.get(name)).singleValue().readLong()
+internal fun rowLong(row: Row, name: String): Long = RowCell(row.get(name)).readLong()
 
-internal fun rowText(row: Row, name: String): String =
-    Rows.valueDecoder(row.get(name)).singleValue().readString()
+internal fun rowText(row: Row, name: String): String = RowCell(row.get(name)).readString()
 
 internal fun numbers(values: List<Long>): SqlArguments {
     val parameters = ArrayList<SqlParameter>()

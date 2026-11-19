@@ -36,3 +36,9 @@
 - 仓库外临时应用通过相对 path 直接依赖三个库，使用安装工具链完成 `check --offline` 与 `run --release --offline`，得到相同 record 往返输出；验证普通下游消费不依赖 workspace 成员身份。该应用及其日志未纳入项目源码。
 
 本次未进行 Linux／Windows 运行验收或 GC stress；不将本机结果表述为跨平台通过。仓库只提供 SQLite 驱动，HBase／Cosmos 仍是设计讨论。
+
+## 数据库行映射生成器（2026-11-19）
+
+- 宿主程序 `scoop-db-generator` 通过协议 v2 为 `RowWriter<T>` 和 `RowReader<T>` 生成方法。数据库列使用 `@DbColumn`、RowValue 与可选的 `ColumnCodec<T>`。SQLite 示例和三个库的测试已迁移。
+- 在 aarch64-apple-darwin、Scoop `0.0.0-dev.20261119` 上通过 workspace 格式、静态检查与 release 构建。三个库的 19 + 5 + 23 项测试全部通过，覆盖缺列与 NULL、构造默认值、嵌套错误路径、泛型列转换及实际 SQLite BLOB 往返。示例输出 `7: Ada (no note)`。
+- Rust 格式与 Clippy 通过。生成器集成测试调用实际 `scoop check`，核对七种无效映射的错误消息和源码位置。仓库外的应用另行验证了跨 Cone 读取列注解与构造默认值，同一 record 可分别以数据库列名和 JSON 字段名往返。
